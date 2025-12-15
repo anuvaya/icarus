@@ -239,7 +239,7 @@ defmodule Icarus.Message.Accumulator do
   defp apply_delta(acc, index, %{type: :signature_delta, signature: signature}) do
     content_blocks =
       Map.update(acc.content_blocks, index, %{type: :thinking, signature: signature}, fn block ->
-        %{block | signature: (block[:signature] || "") <> signature}
+        Map.put(block, :signature, (block[:signature] || "") <> signature)
       end)
 
     %{acc | content_blocks: content_blocks}
