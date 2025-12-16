@@ -13,10 +13,10 @@ defmodule Icarus.Stream do
 
   Start a stream and receive events as messages:
 
-      {:ok, ref} = Icarus.Stream.start(client, request_body, stream_to: self())
+      {:ok, pid} = Icarus.Stream.start(client, request_body, stream_to: self())
 
       receive do
-        {:icarus, ^ref, {:event, event}} ->
+        {:icarus, ^pid, {:event, event}} ->
           # Handle streaming event
           case event do
             %{type: :content_block_delta, delta: %{type: :text_delta, text: text}} ->
@@ -25,18 +25,20 @@ defmodule Icarus.Stream do
               :ok
           end
 
-        {:icarus, ^ref, {:done, message}} ->
+        {:icarus, ^pid, {:done, message}} ->
           # Stream complete, message has full content
 
-        {:icarus, ^ref, {:error, error}} ->
+        {:icarus, ^pid, {:error, error}} ->
           # Handle error
       end
 
+  The pid can be used to cancel the stream with `Icarus.Stream.cancel(pid)`.
+
   ## Message Types
 
-  - `{:icarus, ref, {:event, %Icarus.Event{}}}` - Stream event
-  - `{:icarus, ref, {:done, %Icarus.Message{}}}` - Complete message
-  - `{:icarus, ref, {:error, %Icarus.Error{}}}` - Error occurred
+  - `{:icarus, pid, {:event, %Icarus.Event{}}}` - Stream event
+  - `{:icarus, pid, {:done, %Icarus.Message{}}}` - Complete message
+  - `{:icarus, pid, {:error, %Icarus.Error{}}}` - Error occurred
   """
 
   use GenServer
@@ -46,7 +48,6 @@ defmodule Icarus.Stream do
   require Logger
 
   defstruct [
-    :ref,
     :client,
     :request_body,
     :stream_to,
@@ -63,21 +64,20 @@ defmodule Icarus.Stream do
   # --- Public API ---
 
   @doc """
-  Start a new stream. Returns immediately with a reference.
+  Start a new stream. Returns immediately with the stream pid.
 
   Events will be sent to `stream_to` (defaults to caller).
+  The returned pid can be used to cancel the stream with `cancel/1`.
 
   ## Options
 
   - `:stream_to` - PID to receive events (default: `self()`)
   """
-  @spec start(Client.t(), map(), stream_opts()) :: {:ok, reference()} | {:error, Error.t()}
+  @spec start(Client.t(), map(), stream_opts()) :: {:ok, pid()} | {:error, Error.t()}
   def start(%Client{} = client, request_body, opts \\ []) do
-    ref = make_ref()
     stream_to = Keyword.get(opts, :stream_to, self())
 
     case GenServer.start(__MODULE__, %{
-           ref: ref,
            client: client,
            request_body: request_body,
            stream_to: stream_to
@@ -85,7 +85,7 @@ defmodule Icarus.Stream do
       {:ok, pid} ->
         # Link so stream dies if caller dies (prevents orphan streams)
         Process.link(pid)
-        {:ok, ref}
+        {:ok, pid}
 
       {:error, reason} ->
         {:error, Error.from_transport(reason)}
@@ -97,7 +97,7 @@ defmodule Icarus.Stream do
 
   Same as `start/3` but explicitly links to caller.
   """
-  @spec start_link(Client.t(), map(), stream_opts()) :: {:ok, reference()} | {:error, Error.t()}
+  @spec start_link(Client.t(), map(), stream_opts()) :: {:ok, pid()} | {:error, Error.t()}
   def start_link(client, request_body, opts \\ []) do
     start(client, request_body, opts)
   end
@@ -117,7 +117,6 @@ defmodule Icarus.Stream do
   @impl true
   def init(args) do
     state = %__MODULE__{
-      ref: args.ref,
       client: args.client,
       request_body: args.request_body,
       stream_to: args.stream_to,
@@ -162,7 +161,7 @@ defmodule Icarus.Stream do
     state = process_events(state, final_events)
 
     message = Icarus.Message.Accumulator.finalize(state.message_acc)
-    send(state.stream_to, {:icarus, state.ref, {:done, message}})
+    send(state.stream_to, {:icarus, self(), {:done, message}})
 
     {:stop, :normal, state}
   end
@@ -177,12 +176,12 @@ defmodule Icarus.Stream do
         {:noreply, state}
 
       {:error, %Error{} = error} ->
-        send(state.stream_to, {:icarus, state.ref, {:error, error}})
+        send(state.stream_to, {:icarus, self(), {:error, error}})
         {:stop, :normal, state}
 
       {:error, reason} ->
         error = Error.from_transport(reason)
-        send(state.stream_to, {:icarus, state.ref, {:error, error}})
+        send(state.stream_to, {:icarus, self(), {:error, error}})
         {:stop, :normal, state}
     end
   end
@@ -192,7 +191,7 @@ defmodule Icarus.Stream do
       when ref == task_ref do
     if reason != :normal do
       error = Error.from_transport(reason)
-      send(state.stream_to, {:icarus, state.ref, {:error, error}})
+      send(state.stream_to, {:icarus, self(), {:error, error}})
     end
 
     {:stop, :normal, state}
@@ -214,17 +213,19 @@ defmodule Icarus.Stream do
   # --- Private ---
 
   defp process_events(state, events) do
+    pid = self()
+
     Enum.reduce(events, state, fn %{event: event_type, data: data}, state ->
       event = Event.from_sse(event_type, data)
 
       case event do
         %{type: :error} ->
           error = Error.from_sse_event(data)
-          send(state.stream_to, {:icarus, state.ref, {:error, error}})
+          send(state.stream_to, {:icarus, pid, {:error, error}})
           state
 
         _ ->
-          send(state.stream_to, {:icarus, state.ref, {:event, event}})
+          send(state.stream_to, {:icarus, pid, {:event, event}})
           message_acc = Icarus.Message.Accumulator.apply_event(state.message_acc, event)
           %{state | message_acc: message_acc}
       end

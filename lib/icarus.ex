@@ -32,23 +32,23 @@ defmodule Icarus do
       IO.puts(Icarus.Message.get_text(message))
 
       # Streaming request
-      {:ok, ref} = Icarus.stream([
+      {:ok, pid} = Icarus.stream([
         %{role: "user", content: "Write a poem"}
       ], model: "claude-sonnet-4-20250514")
 
-      receive_loop(ref)
+      receive_loop(pid)
 
-      def receive_loop(ref) do
+      def receive_loop(pid) do
         receive do
-          {:icarus, ^ref, {:event, %{type: :content_block_delta, delta: %{type: :text_delta, text: text}}}} ->
+          {:icarus, ^pid, {:event, %{type: :content_block_delta, delta: %{type: :text_delta, text: text}}}} ->
             IO.write(text)
-            receive_loop(ref)
+            receive_loop(pid)
 
-          {:icarus, ^ref, {:done, message}} ->
+          {:icarus, ^pid, {:done, message}} ->
             IO.puts("\\nDone!")
             message
 
-          {:icarus, ^ref, {:error, error}} ->
+          {:icarus, ^pid, {:error, error}} ->
             IO.puts("Error: \#{error.message}")
         end
       end
@@ -172,13 +172,14 @@ defmodule Icarus do
   @doc """
   Start a streaming conversation. Events sent to calling process.
 
-  Returns `{:ok, ref}` where `ref` identifies messages from this stream.
+  Returns `{:ok, pid}` where `pid` is the stream process. The pid can be used
+  to cancel the stream with `Icarus.Stream.cancel(pid)`.
 
   ## Events
 
-  - `{:icarus, ref, {:event, event}}` - Stream event
-  - `{:icarus, ref, {:done, message}}` - Complete message
-  - `{:icarus, ref, {:error, error}}` - Error occurred
+  - `{:icarus, pid, {:event, event}}` - Stream event
+  - `{:icarus, pid, {:done, message}}` - Complete message
+  - `{:icarus, pid, {:error, error}}` - Error occurred
 
   ## Options
 
@@ -187,32 +188,32 @@ defmodule Icarus do
 
   ## Example
 
-      {:ok, ref} = Icarus.stream([
+      {:ok, pid} = Icarus.stream([
         %{role: "user", content: "Tell me a story"}
       ], model: "claude-sonnet-4-20250514")
 
-      def loop(ref) do
+      def loop(pid) do
         receive do
-          {:icarus, ^ref, {:event, event}} ->
+          {:icarus, ^pid, {:event, event}} ->
             case event do
               %{type: :content_block_delta, delta: %{type: :text_delta, text: text}} ->
                 IO.write(text)
               _ ->
                 :ok
             end
-            loop(ref)
+            loop(pid)
 
-          {:icarus, ^ref, {:done, _message}} ->
+          {:icarus, ^pid, {:done, _message}} ->
             :ok
 
-          {:icarus, ^ref, {:error, error}} ->
+          {:icarus, ^pid, {:error, error}} ->
             {:error, error}
         end
       end
   """
-  @spec stream([message_input()], stream_opts()) :: {:ok, reference()} | {:error, Error.t()}
+  @spec stream([message_input()], stream_opts()) :: {:ok, pid()} | {:error, Error.t()}
   @spec stream(Client.t(), [message_input()], stream_opts()) ::
-          {:ok, reference()} | {:error, Error.t()}
+          {:ok, pid()} | {:error, Error.t()}
   def stream(client_or_messages, messages_or_opts \\ [], opts \\ [])
 
   def stream(%Client{} = client, messages, opts) when is_list(messages) do
